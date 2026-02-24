@@ -10,7 +10,7 @@ public class DemoApplication {
 
     @GetMapping("/")
     public String hello() {
-        return "Welcome to Spring boot demo App deployed on EKS cluster using Jenkins pipeline for CI and ArgoCD for CD!";
+        return "Welcome to Ultimate CI/CD of Spring boot demo App deployed on EKS cluster using Jenkins pipeline for CI and ArgoCD for CD!";
     }
 
     public static void main(String[] args) {
