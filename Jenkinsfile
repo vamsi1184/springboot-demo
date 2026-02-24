@@ -1,48 +1,101 @@
 pipeline {
     agent any
-    environment {
-        AWS_REGION = "us-east-1"
-        ECR_REPO = "<ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/springboot-demo"
-        IMAGE_TAG = "${BUILD_NUMBER}"
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timestamps()
     }
+
+    environment {
+        AWS_REGION   = "us-east-1"
+        ECR_REPO     = "636812143095.dkr.ecr.us-east-1.amazonaws.com/springboot-demo"
+        DOCKER_IMAGE = "springboot-demo"
+        IMAGE_TAG    = "${BUILD_NUMBER}"
+    }
+
     stages {
-        stage ('scm checkout') {
+
+        stage('Build Maven') {
             steps {
-                sh 'git clone https://github.com/vamsi1184/springboot-demo.git'
+                sh 'mvn clean package -DskipTests -B'
             }
         }
-        stage ('build') {
+
+        stage('SonarQube Scan') {
             steps {
-                sh 'cd springboot-demo && ./mvnw clean package -DskipTests'
+                withSonarQubeEnv('sonar-server') {
+                    sh 'mvn sonar:sonar'
+                }
             }
         }
-        stage ('source code analysis') {
+
+        stage('Build Docker Image') {
             steps {
-                sh 'cd springboot-demo && ./mvnw sonar:sonar -Dsonar.projectKey=springboot-demo -Dsonar.host.url=http://localhost:9000 -Dsonar.login=admin -Dsonar.password=admin'
-            }
-        }
-        stage ('build docker image') {
-            steps {
-                sh 'cd springboot-demo && docker build -t springboot-demo:latest .'
-            }
-        }
-        stage ('push docker image to ECR') {
-            steps {
-                sh 'aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <aws_account_id>.dkr.ecr.us-east-1.amazonaws.com'
-                sh 'docker tag springboot-demo:latest <aws_account_id>.dkr.ecr.us-east-1.amazonaws.com/springboot-demo:latest'
-                sh 'docker push <aws_account_id>.dkr.ecr.us-east-1.amazonaws.com/springboot-demo:latest'
-            }
-        }
-        stage ('image update in gitops repo') {
-            steps {
-                sh """git clone https://github.com/vamsi1184/gitops-repo.git
-                cd gitops-repo
-                sed -i 's|springboot-demo:latest|<aws_account_id>.dkr.ecr.us-east-1.amazonaws.com/springboot-demo:latest|g' springboot-demo.yaml
-                git add springboot-demo.yaml
-                git commit -m "Update springboot-demo image"
-                git push origin update-image
+                sh """
+                    docker build -t ${DOCKER_IMAGE}:${IMAGE_TAG} .
+                    docker tag ${DOCKER_IMAGE}:${IMAGE_TAG} ${DOCKER_IMAGE}:latest
                 """
             }
+        }
+
+        stage('Push Docker Image to ECR') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-creds'
+                ]]) {
+
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${ECR_REPO}
+
+                        docker tag ${DOCKER_IMAGE}:${IMAGE_TAG} ${ECR_REPO}:${IMAGE_TAG}
+                        docker tag ${DOCKER_IMAGE}:${IMAGE_TAG} ${ECR_REPO}:latest
+
+                        docker push ${ECR_REPO}:${IMAGE_TAG}
+                        docker push ${ECR_REPO}:latest
+                    """
+                }
+            }
+        }
+
+        stage('Update GitOps Repository') {
+            steps {
+                withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+
+                    sh """
+                        rm -rf gitops-repo
+
+                        git clone https://github.com/vamsi1184/gitops-repo.git
+                        cd gitops-repo
+
+                        git config user.email "vamsi.krishna.1184@gmail.com"
+                        git config user.name "vamsi1184"
+
+                        # Pull latest changes safely
+                        git pull https://${GITHUB_TOKEN}@github.com/vamsi1184/gitops-repo.git main --rebase
+
+                        # Update image tag
+                        sed -i "s|image: .*|image: ${ECR_REPO}:${IMAGE_TAG}|g" deployment.yaml
+
+                        git add deployment.yaml
+                        git commit -m "Update image to ${IMAGE_TAG}" || echo "No changes"
+
+                        git push https://${GITHUB_TOKEN}@github.com/vamsi1184/gitops-repo.git HEAD:main
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Build ${BUILD_NUMBER} completed successfully"
+            echo "🚀 Image pushed: ${ECR_REPO}:${IMAGE_TAG}"
+        }
+
+        failure {
+            echo "❌ Pipeline failed"
         }
     }
 }

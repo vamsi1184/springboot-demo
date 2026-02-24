@@ -1,0 +1,91 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION = "us-east-1"
+        ECR_REPO = "636812143095.dkr.ecr.us-east-1.amazonaws.com/springboot-demo"
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        DOCKER_IMAGE = "springboot-demo"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    credentialsId: 'git',
+                    url: 'https://github.com/vamsi1184/springboot-demo.git'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh 'mvn clean package -DskipTests'
+            }
+        }
+
+        stage('SonarQube Scan') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh 'mvn sonar:sonar'
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${DOCKER_IMAGE}:${IMAGE_TAG} ."
+            }
+        }
+
+        stage('Push Docker Image to ECR') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-creds'
+                ]]) {
+
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${ECR_REPO}
+
+                        docker tag ${DOCKER_IMAGE}:${IMAGE_TAG} ${ECR_REPO}:${IMAGE_TAG}
+
+                        docker push ${ECR_REPO}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+        stage('Update Deployment File') {
+    environment {
+        GIT_REPO_NAME = "gitops-repo"
+        GIT_USER_NAME = "vamsi1184"
+    }
+
+    steps {
+        withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+
+            dir('gitops-repo') {
+                sh '''
+                        git config user.email "vamsi.krishna.1184@gmail.com"
+                        git config user.name "vamsi1184"
+
+                          # Reset remote to clean URL
+                        git remote set-url origin https://github.com/vamsi1184/gitops-repo.git
+
+                        # Pull latest safely using token
+                        git pull https://${GITHUB_TOKEN}@github.com/vamsi1184/gitops-repo.git main --rebase
+
+                        sed -i "s|image: .*|image: 636812143095.dkr.ecr.us-east-1.amazonaws.com/springboot-demo:${BUILD_NUMBER}|g" deployment.yaml
+
+                        git add deployment.yaml
+                        git commit -m "Update image to ${BUILD_NUMBER}" || echo "No changes"
+
+                        git push https://${GITHUB_TOKEN}@github.com/vamsi1184/gitops-repo.git HEAD:main
+                '''
+            }
+        }
+    }
+}
+    }
+}
